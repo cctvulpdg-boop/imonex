@@ -1,0 +1,12 @@
+{
+  "name": "I-MONEX : Inspeksi - Monitoring & Execution",
+  "description": "A comprehensive system for reporting electricity distribution disturbances (Inspeksi) and tracking their resolution (Eksekusi). Features include geolocation, photo reporting, and an administrative dashboard.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

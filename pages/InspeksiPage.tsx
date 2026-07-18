@@ -1,0 +1,363 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { LoginSession, TemuanData, Feeder, Keterangan, Tujuan } from '../types';
+import { compressImage, getDisplayImageUrl } from '../utils/image-utils';
+import ImageEditor from '../src/components/ImageEditor';
+
+interface InspeksiPageProps {
+  session: LoginSession;
+  feeders: Feeder[];
+  keteranganList: Keterangan[];
+  tujuanList?: Tujuan[];
+  onBack: () => void;
+  onSave: (data: TemuanData) => void;
+  historyData?: TemuanData[];
+  initialData?: TemuanData; // Support for Edit mode
+}
+
+const InspeksiPage: React.FC<InspeksiPageProps> = ({ session, feeders, keteranganList, tujuanList = [], onBack, onSave, historyData = [], initialData }) => {
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isLocating, setIsLocating] = useState(false);
+  const [isCompressing, setIsCompressing] = useState(false);
+  const [isManualGeotag, setIsManualGeotag] = useState(false);
+  const [editingImage, setEditingImage] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  const normalize = (s: any) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  const filteredKeteranganList = useMemo(() => {
+    const list = keteranganList || [];
+    const targetIdNorm = normalize(session.idPekerjaan);
+    const targetNameNorm = normalize(session.pekerjaan);
+
+    const filtered = list.filter(k => {
+      if (targetIdNorm === 'pln') return true; // Show all if PLN mode
+      const currentKIdNorm = normalize(k.idPekerjaan);
+      const matchById = (targetIdNorm !== "" && currentKIdNorm === targetIdNorm);
+      const matchByName = (targetNameNorm !== "" && currentKIdNorm === targetNameNorm);
+      return matchById || matchByName;
+    });
+
+    // Jika sedang dalam mode edit, pastikan nilai keterangan yang ada saat ini
+    // tetap tersedia dalam dropdown meskipun filter id_pekerjaan mungkin tidak cocok
+    if (initialData?.keterangan) {
+      const isAlreadyInList = filtered.some(k => k.text === initialData.keterangan);
+      if (!isAlreadyInList) {
+        const existingKeterangan = list.find(k => k.text === initialData.keterangan);
+        if (existingKeterangan) {
+          filtered.push(existingKeterangan);
+        }
+      }
+    }
+
+    return filtered;
+  }, [keteranganList, session, initialData]);
+
+  const availableTujuan = useMemo(() => {
+    if (tujuanList && tujuanList.length > 0) {
+      return tujuanList;
+    }
+    return [
+      { id: 't1', name: 'YANDAL' },
+      { id: 't2', name: 'ROW' },
+      { id: 't3', name: 'HAR' },
+    ];
+  }, [tujuanList]);
+
+  // Ensure prioritas is a number from the start
+  const initialPrioritas = initialData?.prioritas !== undefined ? Number(initialData.prioritas) : 1;
+
+  const [formData, setFormData] = useState<Partial<TemuanData>>({
+    id: initialData?.id || `ID-${Date.now().toString().slice(-8)}`,
+    tanggal: initialData?.tanggal || new Date().toLocaleString('id-ID'),
+    pekerjaan: initialData?.pekerjaan || session.pekerjaan || 'UMUM',
+    inspektor1: initialData?.inspektor1 || session.inspektor1 || '-',
+    inspektor2: initialData?.inspektor2 || session.inspektor2 || '-',
+    ulp: initialData?.ulp || session.ulp || '-',
+    noTiang: initialData?.noTiang || '',
+    noWO: initialData?.noWO || '',
+    feeder: initialData?.feeder || '',
+    alamat: initialData?.alamat || initialData?.lokasi || '',
+    lokasi: initialData?.lokasi || '',
+    geotag: initialData?.geotag || '',
+    fotoTemuan: initialData?.fotoTemuan || '',
+    keterangan: initialData?.keterangan || '',
+    status: initialData?.status || 'BELUM EKSEKUSI',
+    prioritas: initialPrioritas,
+    catatan: initialData?.catatan || '',
+    Team_Tujuan: initialData?.Team_Tujuan || ''
+  });
+
+  const fetchLocation = () => {
+    if (!("geolocation" in navigator)) return;
+    setIsLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const coords = `${pos.coords.latitude.toFixed(7)}, ${pos.coords.longitude.toFixed(7)}`;
+        setFormData(p => ({ ...p, geotag: coords }));
+        setIsLocating(false);
+      },
+      () => { 
+        setIsLocating(false); 
+        alert("Gagal mengambil lokasi secara otomatis. Gunakan input manual.");
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  };
+
+  useEffect(() => { 
+    if (!initialData) fetchLocation(); 
+  }, [initialData]);
+
+  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setEditingImage(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const openPicker = (mode: 'camera' | 'gallery') => {
+    if (fileInputRef.current) {
+      if (mode === 'camera') fileInputRef.current.setAttribute('capture', 'environment');
+      else fileInputRef.current.removeAttribute('capture');
+      fileInputRef.current.click();
+    }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formData.noTiang || !formData.feeder || !formData.fotoTemuan || !formData.keterangan || !formData.alamat || !formData.Team_Tujuan) {
+      alert('Mohon lengkapi seluruh field wajib (*)');
+      return;
+    }
+    setIsSubmitting(true);
+    // Ensure priority is number for correct storage
+    const priorityValue = Number(formData.prioritas || 1);
+    onSave({ ...formData, prioritas: priorityValue, lokasi: formData.alamat } as TemuanData);
+  };
+
+  return (
+    <div className="pb-10">
+      <div className="flex items-center gap-4 mb-8">
+        <button 
+          onClick={onBack} 
+          className="flex items-center gap-2 px-4 py-2.5 bg-white border border-slate-200 rounded-xl shadow-sm hover:bg-slate-50 active:scale-95 transition-all group"
+        >
+          <span className="text-sm font-black text-slate-900 group-hover:-translate-x-1 transition-transform">←</span>
+          <span className="text-[9px] font-black text-slate-900 uppercase tracking-widest">Kembali</span>
+        </button>
+        <div className="flex-1">
+          <h2 className="text-lg font-bold text-slate-900 tracking-tight">{initialData ? 'Edit Data Temuan' : 'Formulir Temuan Baru'}</h2>
+          <p className="text-[10px] text-indigo-600 font-bold uppercase tracking-widest">
+            {initialData ? 'MODE EDIT DATA' : formData.pekerjaan}
+          </p>
+        </div>
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-6">
+        {initialData && (
+          <div className="bg-amber-50 border border-amber-200 p-3 rounded-xl mb-4">
+             <p className="text-[10px] text-amber-800 font-bold uppercase tracking-wider">⚠️ Perhatian: Anda sedang mengubah data ID #{initialData.id.slice(-5)}</p>
+          </div>
+        )}
+
+        <div className="bg-slate-900 rounded-2xl p-5 text-white shadow-lg grid grid-cols-2 gap-y-4">
+          <div className="col-span-2 flex justify-between border-b border-slate-800 pb-3 mb-1">
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">ID: {formData.id}</p>
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{formData.tanggal}</p>
+          </div>
+          <div>
+            <p className="text-[9px] font-bold text-indigo-400 uppercase tracking-wider mb-0.5">Unit Pelaksana</p>
+            <p className="text-xs font-bold">{formData.ulp}</p>
+          </div>
+          <div className="text-right">
+            <p className="text-[9px] font-bold text-indigo-400 uppercase tracking-wider mb-0.5">Inspektorat</p>
+            <p className="text-xs font-bold truncate">{formData.inspektor1} & {formData.inspektor2}</p>
+          </div>
+        </div>
+
+        <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-5">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-1.5 ml-1">No. Tiang / Gardu *</label>
+              <input 
+                type="text" className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold outline-none focus:border-indigo-500 transition-all uppercase"
+                placeholder="Ex: T.44A" value={formData.noTiang} onChange={e => setFormData({ ...formData, noTiang: e.target.value })}
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-1.5 ml-1">No. WO</label>
+              <input 
+                type="text" className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold outline-none focus:border-indigo-500 transition-all"
+                placeholder="2024xx" value={formData.noWO} onChange={e => setFormData({ ...formData, noWO: e.target.value })}
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-1.5 ml-1">Penyulang (Feeder) *</label>
+            <select className="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold outline-none focus:border-indigo-500" value={formData.feeder} onChange={e => setFormData({ ...formData, feeder: e.target.value })}>
+              <option value="">-- Pilih Feeder --</option>
+              {feeders.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-1.5 ml-1">Alamat Detail *</label>
+            <textarea rows={2} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold outline-none focus:border-indigo-500 resize-none" placeholder="Masukkan alamat atau patokan lokasi..." value={formData.alamat} onChange={e => setFormData({ ...formData, alamat: e.target.value })} />
+          </div>
+          <div className="pt-2 border-t border-slate-100">
+            <div className="flex justify-between items-center mb-2">
+              <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Koordinat Geotag</label>
+              <div className="flex gap-4">
+                <button 
+                  type="button" 
+                  onClick={() => setIsManualGeotag(!isManualGeotag)} 
+                  className={`text-[9px] font-black uppercase tracking-widest transition-colors ${isManualGeotag ? 'text-indigo-600' : 'text-slate-400'}`}
+                >
+                  {isManualGeotag ? '⌨️ Mode Manual' : '⌨️ Input Manual'}
+                </button>
+                {!isManualGeotag && (
+                  <button type="button" onClick={fetchLocation} disabled={isLocating} className="text-[9px] font-black uppercase tracking-widest text-indigo-600 disabled:opacity-50">
+                    {isLocating ? 'Mencari...' : '🔄 Refresh GPS'}
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="relative">
+              <input 
+                type="text" 
+                className={`w-full p-3 rounded-xl text-xs font-mono transition-all border outline-none ${isManualGeotag ? 'bg-white border-indigo-400 focus:ring-2 focus:ring-indigo-100' : 'bg-slate-50 border-slate-200 text-slate-500'}`}
+                value={isLocating ? "📍 Sedang mengambil lokasi..." : (formData.geotag || '')} 
+                readOnly={!isManualGeotag}
+                placeholder={isManualGeotag ? "Ketik Lat, Long (Contoh: -0.123, 100.456)" : "Klik Refresh GPS untuk koordinat"}
+                onChange={e => isManualGeotag && setFormData({ ...formData, geotag: e.target.value })}
+              />
+              {isLocating && (
+                <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                   <div className="animate-spin h-3 w-3 border-2 border-indigo-600 border-t-transparent rounded-full"></div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+        
+        <div className="bg-white border-2 border-dashed border-slate-200 rounded-3xl p-4 min-h-[200px] flex flex-col items-center justify-center relative overflow-hidden shadow-sm">
+          <input type="file" accept="image/*" className="hidden" ref={fileInputRef} onChange={handleFile} />
+          {isCompressing ? (
+             <div className="animate-spin h-8 w-8 border-4 border-indigo-600 border-t-transparent rounded-full"></div>
+          ) : formData.fotoTemuan ? (
+            <div className="w-full h-full relative">
+              <img src={getDisplayImageUrl(formData.fotoTemuan)} className="w-full h-64 object-cover rounded-2xl" alt="Preview" />
+              <button type="button" onClick={() => setFormData({ ...formData, fotoTemuan: '' })} className="absolute top-2 right-2 bg-slate-900/80 text-white w-8 h-8 rounded-lg flex items-center justify-center">✕</button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-4 w-full">
+              <button type="button" onClick={() => openPicker('camera')} className="flex flex-col items-center p-6 bg-slate-50 rounded-2xl border border-slate-100">
+                <span className="text-2xl mb-2">📷</span>
+                <span className="text-[10px] font-bold text-slate-600 uppercase">Kamera</span>
+              </button>
+              <button type="button" onClick={() => openPicker('gallery')} className="flex flex-col items-center p-6 bg-slate-50 rounded-2xl border border-slate-100">
+                <span className="text-2xl mb-2">🖼️</span>
+                <span className="text-[10px] font-bold text-slate-600 uppercase">Galeri</span>
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-4 bg-white p-6 rounded-3xl border border-slate-200 shadow-sm">
+          <div>
+            <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide ml-1 mb-2">Kategori Kelainan *</label>
+            <select 
+              className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold outline-none focus:border-indigo-500" 
+              value={formData.keterangan} 
+              onChange={e => setFormData({ ...formData, keterangan: e.target.value })}
+            >
+              <option value="">-- Pilih Kelainan --</option>
+              {filteredKeteranganList.map(k => <option key={k.id} value={k.text}>{k.text}</option>)}
+            </select>
+          </div>
+
+          <div className="pt-4 border-t border-slate-100">
+            <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide ml-1 mb-3">Prioritas Temuan *</label>
+            <div className="flex gap-6 justify-center">
+              {[1, 2, 3].map((star) => (
+                <button
+                  key={star}
+                  type="button"
+                  onClick={() => setFormData({ ...formData, prioritas: star })}
+                  className={`flex flex-col items-center gap-2 p-3 rounded-2xl transition-all duration-300 border ${formData.prioritas === star ? 'bg-indigo-50 border-indigo-200 shadow-inner' : 'bg-white border-transparent'}`}
+                >
+                  <div className="flex gap-0.5">
+                    {Array.from({ length: star }).map((_, i) => (
+                      <span key={i} className={`text-2xl ${formData.prioritas === star ? 'grayscale-0 scale-110 drop-shadow-[0_0_4px_rgba(234,179,8,0.3)]' : 'grayscale opacity-30'}`}>
+                        ⭐
+                      </span>
+                    ))}
+                  </div>
+                  <span className={`text-[9px] font-black uppercase tracking-tighter ${formData.prioritas === star ? 'text-indigo-600' : 'text-slate-400'}`}>
+                    Prioritas {star}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <p className="text-center text-[8px] text-slate-400 font-bold uppercase mt-4 tracking-widest italic">
+              * Bintang 1 adalah prioritas tertinggi (Segera Eksekusi)
+            </p>
+          </div>
+
+          <div className="pt-4 border-t border-slate-100">
+            <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide ml-1 mb-2">TEAM TUJUAN *</label>
+            <select 
+              className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold outline-none focus:border-indigo-500" 
+              value={formData.Team_Tujuan || ''} 
+              onChange={e => setFormData({ ...formData, Team_Tujuan: e.target.value })}
+            >
+              <option value="">-- Pilih Team Eksekusi Tujuan --</option>
+              {availableTujuan.map(t => (
+                <option key={t.id} value={t.name}>{t.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="pt-4 border-t border-slate-100">
+            <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide ml-1 mb-2">Catatan (Opsional)</label>
+            <textarea 
+              rows={3} 
+              className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold outline-none focus:border-indigo-500 resize-none" 
+              placeholder="Tambahkan catatan tambahan jika diperlukan..." 
+              value={formData.catatan} 
+              onChange={e => setFormData({ ...formData, catatan: e.target.value })} 
+            />
+          </div>
+        </div>
+
+        <button type="submit" disabled={isSubmitting || isCompressing} className={`w-full py-5 rounded-2xl shadow-xl font-bold uppercase tracking-[0.2em] text-xs transition-all ${isSubmitting || isCompressing ? 'bg-slate-300' : 'bg-slate-900 text-white hover:bg-slate-800'}`}>
+          {isSubmitting ? '⏳ Menyimpan...' : initialData ? 'Update Laporan Temuan' : 'Simpan Laporan Temuan'}
+        </button>
+      </form>
+
+      {editingImage && (
+        <ImageEditor 
+          imageUrl={editingImage}
+          onSave={async (edited) => {
+            setIsCompressing(true);
+            setEditingImage(null);
+            try {
+              const compressed = await compressImage(edited);
+              setFormData(p => ({ ...p, fotoTemuan: compressed }));
+            } catch (err) {
+              alert('Gagal memproses gambar.');
+            } finally {
+              setIsCompressing(false);
+            }
+          }}
+          onCancel={() => setEditingImage(null)}
+        />
+      )}
+    </div>
+  );
+};
+
+export default InspeksiPage;

@@ -1,0 +1,682 @@
+import React, { useState, useRef, useMemo, useEffect } from 'react';
+import { LoginSession, TemuanData, Yandal, Har, Row, ULP } from '../types';
+import { compressImage, getDisplayImageUrl } from '../utils/image-utils';
+import ImageEditor from '../src/components/ImageEditor';
+import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+import { motion, AnimatePresence } from 'motion/react';
+
+interface EksekusiPageProps {
+  session: LoginSession;
+  data: TemuanData[];
+  onBack: () => void;
+  onSave: (data: TemuanData) => Promise<void> | void;
+  initialData?: TemuanData;
+  yandalList: Yandal[];
+  harList: Har[];
+  rowList: Row[];
+  ulpList: ULP[];
+}
+
+type EksekusiSubFilter = 'BELUM EKSEKUSI' | 'BUTUH PADAM' | 'TIDAK DAPAT IZIN' | 'KENDALA MATERIAL';
+
+const parseGeotag = (geotag?: any): [number, number] | null => {
+  if (!geotag || typeof geotag !== 'string') return null;
+  const parts = geotag.split(',').map(p => parseFloat(p.trim()));
+  if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+    return [parts[0], parts[1]];
+  }
+  return null;
+};
+
+const createCustomIcon = (color: string, isSearching: boolean) => {
+  return L.divIcon({
+    className: 'custom-leaflet-icon',
+    html: `<div class="${isSearching ? 'animate-pulse-marker' : ''}" style="background-color: ${color}; width: 22px; height: 22px; border-radius: 50%; border: 3px solid white; box-shadow: 0 3px 8px rgba(0,0,0,0.3); cursor: pointer;"></div>`,
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
+    popupAnchor: [0, -11]
+  });
+};
+
+const EksekusiPage: React.FC<EksekusiPageProps> = ({ session, data, onBack, onSave, initialData, yandalList, harList, rowList, ulpList }) => {
+  const [selectedTemuan, setSelectedTemuan] = useState<TemuanData | null>(initialData || null);
+  const [executionPhoto, setExecutionPhoto] = useState<string>(initialData?.fotoEksekusi || '');
+  const [executionDate, setExecutionDate] = useState<string>('');
+  const [selectedTeam, setSelectedTeam] = useState<string>(initialData?.timEksekusi || '');
+  const [namaYandal1, setNamaYandal1] = useState<string>(initialData?.namaYandal1 || '');
+  const [namaYandal2, setNamaYandal2] = useState<string>(initialData?.namaYandal2 || '');
+  const [selectedHar, setSelectedHar] = useState<string>(initialData?.HAR || '');
+  const [selectedRow, setSelectedRow] = useState<string>(initialData?.ROW || '');
+  const [isSaving, setIsSaving] = useState(false);
+  const [isCompressing, setIsCompressing] = useState(false);
+  const [editingImage, setEditingImage] = useState<string | null>(null);
+  const [startDate, setStartDate] = useState<string>('');
+  const [endDate, setEndDate] = useState<string>('');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [selectedFeeder, setSelectedFeeder] = useState<string>('');
+  const [selectedPriority, setSelectedPriority] = useState<string>('');
+  const [previewImage, setPreviewImage] = useState<{url: string, title: string} | null>(null);
+  const [subFilter, setSubFilter] = useState<EksekusiSubFilter>('BELUM EKSEKUSI');
+  const [viewMode, setViewMode] = useState<'LIST' | 'MAP'>('LIST');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const openInMaps = (geotag?: string) => {
+    if (!geotag) return;
+    const url = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(geotag)}`;
+    window.open(url, '_blank');
+  };
+
+  const parseRobustDate = (dateStr: any): Date => {
+    if (!dateStr) return new Date(0);
+    if (dateStr instanceof Date) return dateStr;
+    const s = String(dateStr).trim();
+    const nativeDate = new Date(s);
+    if (!isNaN(nativeDate.getTime())) return nativeDate;
+
+    try {
+      const clean = s.replace('pukul ', '').replace(/\./g, ':');
+      const parts = clean.split(',');
+      const dPart = parts[0].trim();
+      const dParts = dPart.split(/[\/\-]/);
+      if (dParts.length === 3) {
+        const day = parseInt(dParts[0], 10);
+        const month = parseInt(dParts[1], 10) - 1;
+        const year = parseInt(dParts[2], 10);
+        const tPart = parts[1] ? parts[1].trim() : null;
+        if (tPart) {
+          const tParts = tPart.split(':');
+          return new Date(year, month, day, parseInt(tParts[0] || '0'), parseInt(tParts[1] || '0'), parseInt(tParts[2] || '0'));
+        }
+        return new Date(year, month, day);
+      }
+    } catch (e) { return new Date(0); }
+    return new Date(0);
+  };
+
+  useEffect(() => {
+    if (initialData?.tanggalEksekusi) {
+      try {
+        const d = parseRobustDate(initialData.tanggalEksekusi);
+        if (d.getTime() > 0) {
+          const year = d.getFullYear();
+          const month = String(d.getMonth() + 1).padStart(2, '0');
+          const day = String(d.getDate()).padStart(2, '0');
+          setExecutionDate(`${year}-${month}-${day}`);
+        }
+      } catch (e) { console.error("Date parse error", e); }
+    }
+    if (initialData?.fotoEksekusi) setExecutionPhoto(initialData.fotoEksekusi);
+    if (initialData?.timEksekusi) setSelectedTeam(initialData.timEksekusi);
+    if (initialData?.namaYandal1) setNamaYandal1(initialData.namaYandal1);
+    if (initialData?.namaYandal2) setNamaYandal2(initialData.namaYandal2);
+    if (initialData?.HAR) setSelectedHar(initialData.HAR);
+    if (initialData?.ROW) setSelectedRow(initialData.ROW);
+  }, [initialData]);
+
+  const formatDriveUrl = (url?: string) => {
+    if (!url) return '';
+    if (url.indexOf('data:image') === 0) return url;
+    if (url.includes('drive.google.com/file/d/')) {
+      const id = url.split('/d/')[1]?.split('/')[0];
+      if (id) return `https://lh3.googleusercontent.com/d/${id}`;
+    }
+    return url;
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setEditingImage(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const openPicker = (mode: 'camera' | 'gallery') => {
+    if (fileInputRef.current) {
+      if (mode === 'camera') fileInputRef.current.setAttribute('capture', 'environment');
+      else fileInputRef.current.removeAttribute('capture');
+      fileInputRef.current.click();
+    }
+  };
+
+  const availableYandal = useMemo(() => {
+    if (!session.ulp) return [];
+    
+    const currentUlp = ulpList.find(u => 
+      (u.name && u.name.trim().toLowerCase() === session.ulp?.trim().toLowerCase()) ||
+      (u.id && u.id.trim().toLowerCase() === session.ulp?.trim().toLowerCase())
+    );
+    
+    const filtered = yandalList.filter(y => {
+      const yUlpId = String(y.ulpId || (y as any).ulp || '').trim().toLowerCase();
+      if (!yUlpId) return false;
+      
+      const sessionUlp = session.ulp?.trim().toLowerCase();
+      if (yUlpId === sessionUlp) return true;
+      
+      if (currentUlp) {
+        const targetId = String(currentUlp.id).trim().toLowerCase();
+        const targetName = String(currentUlp.name).trim().toLowerCase();
+        return yUlpId === targetId || yUlpId === targetName;
+      }
+      return false;
+    });
+
+    console.log(`Filtering Yandal for ${session.ulp}. Found: ${filtered.length} of ${yandalList.length}`);
+    return filtered.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  }, [yandalList, ulpList, session.ulp]);
+
+  const availableHar = useMemo(() => {
+    return [...harList].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  }, [harList]);
+
+  const availableRow = useMemo(() => {
+    return [...rowList].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  }, [rowList]);
+
+  const handleAction = async (newStatus: 'SUDAH EKSEKUSI' | 'BUTUH PADAM' | 'TIDAK DAPAT IZIN' | 'KENDALA MATERIAL') => {
+    if (!selectedTemuan) return;
+    if (!selectedTeam) { alert('⚠️ Tim Kerja wajib dipilih!'); return; }
+    
+    if (!executionPhoto) { alert('⚠️ Foto bukti perbaikan wajib dilampirkan!'); return; }
+    
+    setIsSaving(true);
+    let finalDateString = new Date().toLocaleDateString('id-ID');
+    if (executionDate) {
+      const [year, month, day] = executionDate.split('-').map(Number);
+      finalDateString = new Date(year, month - 1, day).toLocaleDateString('id-ID');
+    }
+
+    const updated: TemuanData = {
+      ...selectedTemuan,
+      status: newStatus, 
+      tanggalEksekusi: finalDateString,
+      fotoEksekusi: executionPhoto,
+      timEksekusi: selectedTeam,
+      namaYandal1: selectedTeam === 'Team Yandal' ? namaYandal1 : '',
+      namaYandal2: selectedTeam === 'Team Yandal' ? namaYandal2 : '',
+      HAR: selectedTeam === 'Team HAR' ? selectedHar : '',
+      ROW: selectedTeam === 'Team ROW' ? selectedRow : ''
+    };
+    
+    try {
+      await onSave(updated);
+      if (!initialData) {
+        setSelectedTemuan(null);
+        setExecutionPhoto('');
+        setExecutionDate('');
+        setSelectedTeam('');
+        setNamaYandal1('');
+        setNamaYandal2('');
+        setSelectedHar('');
+        setSelectedRow('');
+      }
+    } catch (err) { alert("❌ Gagal menyimpan data eksekusi."); }
+    finally { setIsSaving(false); }
+  };
+
+  // Reset filter when tab changes
+  useEffect(() => {
+    setSelectedFeeder('');
+    setSelectedPriority('');
+  }, [subFilter]);
+
+  const availableFeeders = useMemo(() => {
+    const uniqueFeeders = Array.from(new Set(
+      data
+        .filter(item => {
+          const itemStatus = item.status || 'BELUM EKSEKUSI';
+          return itemStatus === subFilter;
+        })
+        .map(item => item.feeder)
+        .filter(Boolean)
+    ));
+    return uniqueFeeders.sort();
+  }, [data, subFilter]);
+
+  const filteredQueue = useMemo(() => {
+    const filtered = data.filter(item => {
+      const itemStatus = item.status || 'BELUM EKSEKUSI';
+      const isMatchStatus = itemStatus === subFilter;
+      
+      if (!isMatchStatus) return false;
+
+      const noTiangStr = String(item.noTiang || '');
+      const matchesSearch = !searchQuery || noTiangStr.toLowerCase().includes(searchQuery.toLowerCase());
+      if (!matchesSearch) return false;
+
+      const matchesFeeder = !selectedFeeder || item.feeder === selectedFeeder;
+      if (!matchesFeeder) return false;
+
+      const matchesPriority = !selectedPriority || String(item.prioritas) === selectedPriority;
+      if (!matchesPriority) return false;
+
+      const itemDate = parseRobustDate(item.tanggal);
+      const itemDateOnly = new Date(itemDate.getFullYear(), itemDate.getMonth(), itemDate.getDate());
+      if (startDate) {
+        const s = new Date(startDate); s.setHours(0,0,0,0);
+        if (itemDateOnly < s) return false;
+      }
+      if (endDate) {
+        const e = new Date(endDate); e.setHours(0,0,0,0);
+        if (itemDateOnly > e) return false;
+      }
+      return true;
+    });
+    return filtered.sort((a, b) => parseRobustDate(b.tanggal).getTime() - parseRobustDate(a.tanggal).getTime());
+  }, [data, startDate, endDate, searchQuery, subFilter, selectedFeeder, selectedPriority, viewMode]);
+
+  const renderStars = (count: number) => {
+    const priority = Number(count || 1);
+    return (
+      <div className="flex gap-0.5">
+        {Array.from({ length: priority }).map((_, i) => (
+          <span key={i} className="text-[10px] drop-shadow-sm">⭐</span>
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div className="pb-10">
+      <div className="flex items-center mb-8 gap-4">
+        <button onClick={onBack} className="flex items-center gap-2 px-4 py-2.5 bg-white border border-slate-200 rounded-xl shadow-sm hover:bg-slate-50 active:scale-95 transition-all group">
+          <span className="text-sm font-black text-slate-900 group-hover:-translate-x-1 transition-transform">←</span>
+          <span className="text-[9px] font-black text-slate-900 uppercase tracking-widest">Kembali</span>
+        </button>
+        <div className="flex-1">
+          <h2 className="text-lg font-bold text-slate-900 tracking-tight">{initialData ? 'Edit Eksekusi' : 'Antrean Eksekusi'}</h2>
+          <p className="text-[11px] text-emerald-600 font-bold uppercase tracking-wider">{session.ulp}</p>
+        </div>
+      </div>
+
+      {!initialData && (
+        <div className="space-y-4">
+          <div className="bg-white p-5 rounded-3xl border border-slate-200 mb-2 shadow-sm space-y-4">
+            <div>
+              <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-3 ml-1">Cari No. Tiang</p>
+              <div className="relative">
+                <input type="text" className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-xs font-bold outline-none focus:border-indigo-500 transition-all uppercase" placeholder="Ketik No. Tiang..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none">🔍</span>
+              </div>
+            </div>
+            <div className="pt-2 border-t border-slate-50">
+              <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-3 ml-1">Saring Feeder & Tanggal</p>
+              <div className="space-y-3">
+                <select 
+                  className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-[11px] font-bold outline-none focus:border-indigo-500 transition-all"
+                  value={selectedFeeder}
+                  onChange={(e) => setSelectedFeeder(e.target.value)}
+                >
+                  <option value="">SEMUA FEEDER</option>
+                  {availableFeeders.map(feederName => (
+                    <option key={feederName} value={feederName}>{feederName}</option>
+                  ))}
+                </select>
+                <select 
+                  className="p-3 bg-slate-50 border border-slate-100 rounded-xl text-[11px] font-bold outline-none focus:border-indigo-500 transition-all uppercase"
+                  value={selectedPriority}
+                  onChange={(e) => setSelectedPriority(e.target.value)}
+                >
+                  <option value="">SEMUA PRIORITAS</option>
+                  <option value="1">⭐ 1 (Urgent)</option>
+                  <option value="2">⭐⭐ 2 (Waspada)</option>
+                  <option value="3">⭐⭐⭐ 3 (Normal)</option>
+                  </select>
+                <div className="grid grid-cols-2 gap-3">
+                  <input type="date" className="p-3 bg-slate-50 border border-slate-100 rounded-xl text-[11px] font-bold outline-none" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+                  <input type="date" className="p-3 bg-slate-50 border border-slate-100 rounded-xl text-[11px] font-bold outline-none" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex bg-white p-1 rounded-2xl border border-slate-200 shadow-sm gap-1 mb-4">
+            <button 
+              onClick={() => setViewMode('LIST')} 
+              className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${viewMode === 'LIST' ? 'bg-slate-900 text-white shadow-md' : 'text-slate-400 hover:bg-slate-50'}`}
+            >
+              📋 Antrean Eksekusi
+            </button>
+            <button 
+              onClick={() => setViewMode('MAP')} 
+              className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${viewMode === 'MAP' ? 'bg-slate-900 text-white shadow-md' : 'text-slate-400 hover:bg-slate-50'}`}
+            >
+              🗺️ Eksekusi By Maps
+            </button>
+          </div>
+
+          <div className="flex bg-white p-1 rounded-2xl border border-slate-200 shadow-sm overflow-x-auto gap-1 scrollbar-hide no-scrollbar">
+            {(['BELUM EKSEKUSI', 'BUTUH PADAM', 'TIDAK DAPAT IZIN', 'KENDALA MATERIAL'] as const).map((f) => (
+              <button
+                key={f}
+                onClick={() => setSubFilter(f)}
+                className={`whitespace-nowrap px-5 py-3 text-[10px] font-black rounded-xl transition-all uppercase tracking-widest flex-shrink-0 flex-1 md:flex-initial min-w-max ${subFilter === f ? 'bg-slate-900 text-white shadow-md scale-100' : 'text-slate-400 hover:bg-slate-50'}`}
+              >
+                {f === 'TIDAK DAPAT IZIN' ? 'TIDAK IZIN' : f}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex justify-between items-center px-1 mt-1">
+             <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total Atrean: <span className="text-indigo-600">{filteredQueue.length}</span> Data</p>
+          </div>
+        </div>
+      )}
+
+      {filteredQueue.length === 0 && !initialData ? (
+        <div className="text-center py-24 bg-white rounded-3xl border border-dashed border-slate-200 mt-6">
+          <p className="text-slate-500 text-xs font-bold uppercase tracking-widest">Tidak ada data {subFilter.toLowerCase()}</p>
+        </div>
+      ) : viewMode === 'MAP' && !initialData ? (
+        <div className="mt-6 bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden h-[500px] relative z-0">
+          <MapContainer 
+            center={parseGeotag(filteredQueue.find(q => q.geotag)?.geotag) || [-0.9067, 100.3543]} 
+            zoom={13} 
+            style={{ width: '100%', height: '100%' }}
+            zoomControl={false}
+          >
+            <TileLayer
+              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            />
+            {filteredQueue.map((item, idx) => {
+              const pos = parseGeotag(item.geotag);
+              if (!pos) return null;
+              const isMatch = searchQuery !== '' && String(item.noTiang).toLowerCase().includes(searchQuery.toLowerCase());
+              
+              // Determine marker color based on status
+              const itemStatus = item.status || 'BELUM EKSEKUSI';
+              let markerColor = '#ef4444'; // Default Red
+              if (itemStatus === 'SUDAH EKSEKUSI') markerColor = '#10b981'; // Green
+              else if (itemStatus === 'BUTUH PADAM') markerColor = '#f59e0b'; // Yellow
+              else if (itemStatus === 'KENDALA MATERIAL') markerColor = '#8b5cf6'; // Purple
+              else if (itemStatus === 'TIDAK DAPAT IZIN') markerColor = '#78350f'; // Brown
+
+              return (
+                <Marker 
+                  key={`${item.id}-${idx}`} 
+                  position={pos} 
+                  icon={createCustomIcon(markerColor, isMatch)}
+                >
+                  <Popup>
+                    <div className="p-1 min-w-[180px] space-y-2">
+                       <div className="flex items-center justify-between border-b pb-1">
+                         {renderStars(item.prioritas)}
+                         <span className={`text-[8px] px-1.5 py-0.5 rounded font-black uppercase ${
+                           (item.status || 'BELUM EKSEKUSI') === 'SUDAH EKSEKUSI' ? 'bg-emerald-50 text-emerald-700' : 
+                           (item.status || 'BELUM EKSEKUSI') === 'BELUM EKSEKUSI' ? 'bg-red-50 text-red-700' : 
+                           (item.status || 'BELUM EKSEKUSI') === 'BUTUH PADAM' ? 'bg-amber-50 text-amber-700' : 
+                           (item.status || 'BELUM EKSEKUSI') === 'KENDALA MATERIAL' ? 'bg-purple-50 text-purple-700' : 
+                           (item.status || 'BELUM EKSEKUSI') === 'TIDAK DAPAT IZIN' ? 'bg-orange-900/10 text-orange-900' : 
+                           'bg-slate-50 text-slate-700'
+                         }`}>
+                           {(item.status || 'BELUM EKSEKUSI') === 'TIDAK DAPAT IZIN' ? 'TIDAK IZIN' : (item.status || 'BELUM EKSEKUSI')}
+                         </span>
+                       </div>
+                       <div>
+                         <p className="text-[10px] font-black text-indigo-600 uppercase">{item.noWO}</p>
+                         <p className="text-xs font-bold text-slate-900 uppercase">{item.noTiang}</p>
+                       </div>
+                       <p className="text-[9px] text-slate-600 font-bold leading-tight">📍 {item.alamat || item.lokasi || 'Alamat tidak tersedia'}</p>
+                       <p className="text-[10px] font-bold text-red-600">{item.keterangan}</p>
+                       <button 
+                         onClick={() => setSelectedTemuan(item)}
+                         className="w-full mt-2 py-2 bg-slate-900 text-white text-[9px] font-bold rounded-lg uppercase tracking-wider transition-all"
+                       >
+                         {item.status === 'SUDAH EKSEKUSI' ? 'Edit Hasil Eksekusi' : 'Proses Eksekusi'}
+                       </button>
+                    </div>
+                  </Popup>
+                </Marker>
+              );
+            })}
+          </MapContainer>
+        </div>
+      ) : (
+        <div className="space-y-4 mt-6">
+          {(initialData ? [initialData] : filteredQueue).map((item, idx) => (
+            <div key={`${item.id}-${idx}`} className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm hover:border-indigo-200 transition-all flex flex-col group animate-fade-in">
+              <div className="px-4 pt-3 pb-1 border-b border-slate-50 flex justify-between items-center">
+                <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest">
+                  🗓️ {parseRobustDate(item.tanggal).toLocaleDateString('id-ID')}
+                </p>
+                <div className="flex flex-col items-end">
+                  <span className={`text-[8px] px-2 py-0.5 rounded font-black uppercase ${
+                    (item.status || 'BELUM EKSEKUSI') === 'SUDAH EKSEKUSI' ? 'bg-emerald-50 text-emerald-700' : 
+                    (item.status || 'BELUM EKSEKUSI') === 'BELUM EKSEKUSI' ? 'bg-red-50 text-red-700' : 
+                    (item.status || 'BELUM EKSEKUSI') === 'BUTUH PADAM' ? 'bg-amber-50 text-amber-700' : 
+                    (item.status || 'BELUM EKSEKUSI') === 'KENDALA MATERIAL' ? 'bg-purple-50 text-purple-700' : 
+                    (item.status || 'BELUM EKSEKUSI') === 'TIDAK DAPAT IZIN' ? 'bg-orange-900/10 text-orange-900' : 
+                    'bg-slate-50 text-slate-700'
+                  }`}>
+                    {(item.status || 'BELUM EKSEKUSI') === 'TIDAK DAPAT IZIN' ? 'TIDAK IZIN' : (item.status || 'BELUM EKSEKUSI')}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex p-4 gap-4 pb-2">
+                <div className="relative flex-shrink-0 cursor-zoom-in" onClick={() => setPreviewImage({ url: formatDriveUrl(item.fotoTemuan), title: `Foto Temuan: ${item.noTiang}` })}>
+                  <div className="w-20 h-20 bg-slate-100 rounded-xl overflow-hidden border border-slate-100">
+                    <img src={formatDriveUrl(item.fotoTemuan)} alt="Temuan" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                  </div>
+                  <p className="text-[7px] font-black text-center mt-1 uppercase text-slate-400">Temuan</p>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="mb-1">
+                    {renderStars(item.prioritas)}
+                  </div>
+                  <p className="text-[10px] font-black text-indigo-600 uppercase tracking-tight mb-0.5">
+                    {item.feeder}
+                  </p>
+                  <h3 className="font-bold text-slate-900 text-sm truncate uppercase tracking-tight mb-0.5">
+                    {item.noTiang}
+                  </h3>
+                  <p className="text-xs font-bold text-red-600 line-clamp-1">{item.keterangan}</p>
+                </div>
+              </div>
+              
+              <div className="px-4 pb-3">
+                <div className="flex items-center justify-between gap-2 p-3 bg-slate-50 rounded-xl border border-slate-100">
+                  <p className="text-[10px] text-slate-600 font-bold italic flex-1 leading-tight">
+                    📍 {item.alamat || item.lokasi || 'Alamat tidak tersedia'}
+                  </p>
+                  {item.geotag && (
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); openInMaps(item.geotag); }}
+                      className="flex-shrink-0 flex items-center gap-1.5 px-3 py-2 bg-white border border-slate-200 rounded-lg active:scale-90 transition-all hover:bg-white shadow-sm"
+                    >
+                      <span className="text-[11px]">🗺️</span>
+                      <span className="text-[9px] font-black text-indigo-600 uppercase tracking-widest">Maps</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="px-4 pb-4 flex flex-col gap-1">
+                 <p className="text-[8px] font-bold text-slate-400 uppercase italic">
+                   Input oleh: {item.inspektor1}{item.inspektor2 ? ` & ${item.inspektor2}` : ''}
+                 </p>
+                 {item.catatan && (
+                   <div className="mt-2 p-3 bg-slate-50 rounded-xl border border-slate-100">
+                     <p className="text-[7px] font-black text-slate-400 uppercase tracking-widest mb-1">📝 Catatan:</p>
+                     <p className="text-[10px] text-slate-700 font-bold leading-relaxed">{item.catatan}</p>
+                   </div>
+                 )}
+              </div>
+
+              <button onClick={() => setSelectedTemuan(item)} className="w-full bg-slate-900 text-white font-bold py-4 text-xs uppercase tracking-[0.2em] active:bg-slate-800 transition-colors shadow-inner">{initialData ? 'EDIT DETAIL EKSEKUSI' : 'PROSES EKSEKUSI'}</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {selectedTemuan && (
+        <div className="fixed inset-0 bg-slate-900/95 backdrop-blur-md z-[999] flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white w-full max-sm rounded-3xl shadow-2xl flex flex-col my-8" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center p-6 border-b border-slate-100">
+              <h3 className="text-lg font-bold text-slate-900">Form Laporan Eksekusi</h3>
+              <button onClick={() => initialData ? onBack() : setSelectedTemuan(null)} className="text-slate-400 p-2">✕</button>
+            </div>
+            <div className="p-6 space-y-6">
+              <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                <p className="text-[9px] font-bold text-slate-400 uppercase mb-1">Aset Target</p>
+                <p className="font-bold text-slate-900 text-sm uppercase mb-1">{selectedTemuan.noTiang} • {selectedTemuan.feeder}</p>
+                {selectedTemuan.catatan && (
+                  <p className="text-[10px] text-slate-500 font-bold italic border-t border-slate-200 mt-2 pt-2">
+                    📝 Catatan: {selectedTemuan.catatan}
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest ml-1">Pilih Tim Kerja *</label>
+                <select className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-900 outline-none focus:ring-2 focus:ring-indigo-100 transition-all" value={selectedTeam} onChange={(e) => setSelectedTeam(e.target.value)}>
+                  <option value="">-- Pilih Tim Kerja --</option>
+                  <option value="Team ROW">Team ROW</option>
+                  <option value="Team Yandal">Team Yandal</option>
+                  <option value="Team HAR">Team HAR</option>
+                  <option value="Team Pemeliharaan">Team PLN</option>
+                </select>
+              </div>
+
+              {selectedTeam === 'Team Yandal' && (
+                <div className="grid grid-cols-2 gap-4 animate-slide-down">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest ml-1">Nama Yandal 1</label>
+                    <select 
+                      className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-900 outline-none focus:ring-2 focus:ring-indigo-100 transition-all"
+                      value={namaYandal1} 
+                      onChange={(e) => setNamaYandal1(e.target.value)}
+                    >
+                      <option value="">{availableYandal.length === 0 ? '-- Data Yandal Kosong --' : '-- Pilih Nama 1 --'}</option>
+                      {availableYandal.map(y => (
+                        <option key={y.id} value={y.name}>{y.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest ml-1">Nama Yandal 2</label>
+                    <select 
+                      className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-900 outline-none focus:ring-2 focus:ring-indigo-100 transition-all"
+                      value={namaYandal2} 
+                      onChange={(e) => setNamaYandal2(e.target.value)}
+                    >
+                      <option value="">{availableYandal.length === 0 ? '-- Data Yandal Kosong --' : '-- Pilih Nama 2 --'}</option>
+                      {availableYandal.map(y => (
+                        <option key={y.id} value={y.name}>{y.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+
+              {selectedTeam === 'Team HAR' && (
+                <div className="animate-slide-down">
+                  <label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest ml-1">Pilih Personil HAR</label>
+                  <select 
+                    className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-900 outline-none focus:ring-2 focus:ring-indigo-100 transition-all"
+                    value={selectedHar} 
+                    onChange={(e) => setSelectedHar(e.target.value)}
+                  >
+                    <option value="">{availableHar.length === 0 ? '-- Data HAR Kosong --' : '-- Pilih Personil --'}</option>
+                    {availableHar.map(h => (
+                      <option key={h.id} value={h.name}>{h.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {selectedTeam === 'Team ROW' && (
+                <div className="animate-slide-down">
+                  <label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest ml-1">Pilih Personil ROW</label>
+                  <select 
+                    className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-900 outline-none focus:ring-2 focus:ring-indigo-100 transition-all"
+                    value={selectedRow} 
+                    onChange={(e) => setSelectedRow(e.target.value)}
+                  >
+                    <option value="">{availableRow.length === 0 ? '-- Data ROW Kosong --' : '-- Pilih Personil --'}</option>
+                    {availableRow.map(r => (
+                      <option key={r.id} value={r.name}>{r.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest ml-1">Tanggal Eksekusi</label>
+                <input type="date" className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-indigo-700 outline-none" value={executionDate} onChange={(e) => setExecutionDate(e.target.value)} />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest ml-1">Bukti Foto Perbaikan *</label>
+                <div className="flex flex-col items-center justify-center border-2 border-dashed border-slate-200 rounded-2xl p-4 bg-slate-50/50 min-h-[220px]">
+                  <input type="file" accept="image/*" className="hidden" ref={fileInputRef} onChange={handleFileChange} />
+                  {isCompressing ? (
+                    <div className="animate-spin h-6 w-6 border-4 border-emerald-500 border-t-transparent rounded-full"></div>
+                  ) : executionPhoto ? (
+                    <div className="relative w-full">
+                      <img src={getDisplayImageUrl(executionPhoto)} alt="Preview" className="w-full h-56 object-cover rounded-xl" />
+                      <button onClick={() => setExecutionPhoto('')} className="absolute top-2 right-2 bg-slate-900/80 text-white w-8 h-8 rounded-lg flex items-center justify-center">✕</button>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-3 w-full">
+                      <button type="button" onClick={() => openPicker('camera')} className="flex flex-col items-center p-5 bg-white border border-slate-200 rounded-2xl">
+                        <span className="text-xl mb-2">📷</span>
+                        <span className="text-[9px] font-bold text-slate-600 uppercase">Kamera</span>
+                      </button>
+                      <button type="button" onClick={() => openPicker('gallery')} className="flex flex-col items-center p-5 bg-white border border-slate-200 rounded-2xl">
+                        <span className="text-xl mb-2">🖼️</span>
+                        <span className="text-[9px] font-bold text-slate-600 uppercase">Galeri</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="p-6 bg-slate-50 border-t border-slate-100 rounded-b-3xl">
+              <button onClick={() => handleAction('SUDAH EKSEKUSI')} disabled={isSaving || isCompressing} className={`w-full py-4 rounded-xl shadow-lg uppercase text-[10px] font-black tracking-[0.2em] ${isSaving || isCompressing ? 'bg-slate-300' : 'bg-emerald-600 text-white'}`}>{isSaving ? '⏳ Menyimpan...' : '✅ Simpan Laporan Selesai'}</button>
+              <div className="grid grid-cols-3 gap-2 mt-3">
+                <button onClick={() => handleAction('BUTUH PADAM')} className="py-3 rounded-xl bg-amber-500 text-white text-[8px] font-bold uppercase">⚡ Butuh Padam</button>
+                <button onClick={() => handleAction('TIDAK DAPAT IZIN')} className="py-3 rounded-xl bg-orange-600 text-white text-[8px] font-bold uppercase">🚫 Tidak Izin</button>
+                <button onClick={() => handleAction('KENDALA MATERIAL')} className="py-3 rounded-xl bg-red-600 text-white text-[8px] font-bold uppercase">📦 Kendala</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {previewImage && (
+        <div className="fixed inset-0 bg-slate-900/95 backdrop-blur-sm z-[1000] flex flex-col items-center justify-center p-4" onClick={() => setPreviewImage(null)}>
+          <img src={previewImage.url} alt="Preview" className="w-full max-w-md aspect-square object-contain bg-slate-100 rounded-3xl" referrerPolicy="no-referrer" />
+          <p className="text-white/50 text-[10px] mt-6 font-bold uppercase tracking-[0.2em]">Sentuh di mana saja untuk menutup</p>
+        </div>
+      )}
+
+      {editingImage && (
+        <ImageEditor 
+          imageUrl={editingImage}
+          onSave={async (edited) => {
+            setIsCompressing(true);
+            setEditingImage(null);
+            try {
+              const compressed = await compressImage(edited);
+              setExecutionPhoto(compressed);
+            } catch (err) {
+              alert('Gagal memproses gambar perbaikan.');
+            } finally {
+              setIsCompressing(false);
+            }
+          }}
+          onCancel={() => setEditingImage(null)}
+        />
+      )}
+    </div>
+  );
+};
+
+export default EksekusiPage;
